@@ -1,4 +1,4 @@
-# CIS Amazon EKS Benchmark — kube-bench (Banking / Strong-Compliance Profile)
+# CIS Amazon EKS Benchmark — kube-bench
 
 Runs the **CIS Amazon EKS Benchmark** against your cluster using
 [kube-bench](https://github.com/aquasecurity/kube-bench), then produces a
