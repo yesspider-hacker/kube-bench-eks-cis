@@ -1,0 +1,147 @@
+# =============================================================================
+# kube-bench CIS Amazon EKS Benchmark Job  (banking / strong-compliance profile)
+# =============================================================================
+# EKS control plane is AWS-managed, so this audits:
+#   - node        : worker-node kubelet config, file permissions, ownership
+#   - policies    : RBAC, service accounts, network policies, pod security
+#   - managedservices : EKS/AWS layer guidance (image provenance, secrets, logging)
+#
+# Output is emitted as JSON to the pod log for machine-readable reporting.
+# A dedicated ServiceAccount with least-privilege RBAC is used (no default SA).
+# =============================================================================
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-bench
+  namespace: kube-bench
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-bench
+
+---
+# Least-privilege: kube-bench's policy checks read RBAC + a few cluster objects.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-bench-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces", "serviceaccounts", "pods", "services", "configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["policy"]
+    resources: ["podsecuritypolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-bench-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-bench-reader
+subjects:
+  - kind: ServiceAccount
+    name: kube-bench
+    namespace: kube-bench
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kube-bench
+  namespace: kube-bench
+  labels:
+    app: kube-bench
+    profile: banking-cis-eks
+spec:
+  # Keep the pod around long enough to pull logs; auto-clean after 1h.
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: kube-bench
+    spec:
+      serviceAccountName: kube-bench
+      hostPID: true                      # required to inspect kubelet process flags
+      # Pin the pod to a real worker node (skip Fargate; kube-bench needs host FS).
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: eks.amazonaws.com/compute-type
+                    operator: NotIn
+                    values: ["fargate"]
+      tolerations:
+        - operator: Exists               # run even on tainted/critical nodes
+      restartPolicy: Never
+      containers:
+        - name: kube-bench
+          # NOTE: verify the latest tag at
+          # https://github.com/aquasecurity/kube-bench/releases and update if needed.
+          image: docker.io/aquasec/kube-bench:v0.10.7
+          imagePullPolicy: IfNotPresent
+          command: ["kube-bench"]
+          args:
+            - "run"
+            - "--targets"
+            - "node,policies,managedservices"
+            - "--benchmark"
+            - "eks-1.5.0"              # match to your cluster's K8s version
+            - "--json"                 # machine-readable output for the report
+          securityContext:
+            runAsUser: 0               # needs root to read host kubelet files
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: var-lib-kubelet
+              mountPath: /var/lib/kubelet
+              readOnly: true
+            - name: etc-systemd
+              mountPath: /etc/systemd
+              readOnly: true
+            - name: etc-kubernetes
+              mountPath: /etc/kubernetes
+              readOnly: true
+            - name: etc-cni
+              mountPath: /opt/cni/bin
+              readOnly: true
+      volumes:
+        - name: var-lib-kubelet
+          hostPath:
+            path: "/var/lib/kubelet"
+        - name: etc-systemd
+          hostPath:
+            path: "/etc/systemd"
+        - name: etc-kubernetes
+          hostPath:
+            path: "/etc/kubernetes"
+        - name: etc-cni
+          hostPath:
+            path: "/opt/cni/bin"
